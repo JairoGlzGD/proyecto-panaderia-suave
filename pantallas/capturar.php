@@ -1,0 +1,36 @@
+<?php
+if (!defined("SUAVE_RAIZ")) { http_response_code(404); exit; }
+use Suave\Interfaz as V;use Suave\Numeros as N;use Suave\Entregas;
+$id=(int)($_GET['id']??$_POST['id']??0);$delivery=$id?(new Entregas($db))->get($id):null;
+$editing=$delivery&&$delivery['estado']==='Registrada';
+$data=$delivery['datos']??[];
+$dateDefault=$month===date('Y-m')?date('Y-m-d'):$month.'-01';
+$currentMonth=substr((string)V::value('fecha',$data['fecha']??$dateDefault),0,7);if(!preg_match('/^\d{4}-\d{2}$/',$currentMonth))$currentMonth=$month;
+$captureRules=(new Suave\Periodos($db))->get($currentMonth)['parametros'];
+$quantities=[];$prices=[];$names=[];
+foreach($delivery['lineas']??[] as $line){$names[]=$line['producto_clave']??$line['producto_nombre'];$quantities[]=$line['cantidad_milesimas']===null?'':rtrim(rtrim(N::input((int)$line['cantidad_milesimas'],3),'0'),'.');$prices[]=$line['precio_centavos']===null?'':N::input((int)$line['precio_centavos']);}
+if($_SERVER['REQUEST_METHOD']==='POST'){$names=is_array($_POST['producto']??null)?$_POST['producto']:[''];$quantities=is_array($_POST['cantidad']??null)?$_POST['cantidad']:[''];$prices=is_array($_POST['precio']??null)?$_POST['precio']:[''];}
+if(!$names)$names=[''];
+$oldKeys=array_column($delivery['lineas']??[],'producto_clave');$productOptions=[''=>'Selecciona un producto'];
+foreach($db->all('SELECT * FROM productos ORDER BY nombre') as $p)if($p['activo']||in_array($p['nombre'],$oldKeys,true))$productOptions[$p['nombre']]=$p['nombre'].($p['activo']?'':' · fuera de uso');
+$branchOptions=[''=>'Selecciona una sucursal'];foreach($allBranches as $b)if($b['activo']||$b['codigo']===($delivery['sucursal_codigo']??null))$branchOptions[$b['codigo']]=$b['codigo'].' · '.$b['nombre'];
+$step=(int)$captureRules['decimales_cantidad']===0?'1':'0.'.str_repeat('0',(int)$captureRules['decimales_cantidad']-1).'1';
+$return=($_GET['volver']??'')==='conciliacion'?'conciliacion':'entregas';
+?>
+<div class="page-heading"><div><h1><?=$editing?'Corregir '.$delivery['referencia']:($delivery?'Continuar '.$delivery['referencia']:'Nueva entrega')?></h1><p>Transcribe la nota de papel. El sistema calcula los importes.</p></div><?=V::badge($delivery['estado']??'Borrador')?></div>
+<?php if(($app->error?->field??'')==='conflicto_entrega' && $delivery):?><div class="notice warning"><strong>Versión vigente guardada: v<?=V::h($delivery['version_actual'])?></strong><p>Fecha <?=V::date($delivery['fecha'])?> · Total <?=N::currency((int)$delivery['total_centavos'])?>. Tu edición se conserva debajo para que puedas revisarla.</p><?=$w->link('Consultar la nota vigente','ver_entrega',['id'=>$id],'text-link')?></div><?php endif?>
+<?php if(count($productOptions)===1||count($branchOptions)===1):?><div class="notice"><strong>Completa los catálogos para registrar</strong><p>Necesitas al menos una sucursal y un producto reales. Puedes guardar una captura incompleta como borrador.</p><?=$w->link('Abrir Catálogos','catalogos',[],'text-link')?></div><?php endif?>
+<?php if($period['estado']==='Revisado'):?><div class="notice warning">Este mes está revisado. <?=$w->link('Abrir Cierre mensual para reabrirlo','cierre',[],'text-link')?></div><?php endif?>
+<form method="post" enctype="multipart/form-data" data-dirty data-delivery>
+<?=V::protect('entrega_guardar')?><?=V::hidden('id',$id)?><?=V::hidden('version',V::value('version',$delivery['version_actual']??0))?><?=V::hidden('mes',$month)?>
+<div class="form-grid delivery-header"><?=V::select('Sucursal *','sucursal_codigo',$branchOptions,V::value('sucursal_codigo',$data['sucursal_codigo']??$branch),['required'=>true])?><?=V::input('Fecha *','fecha',V::value('fecha',$data['fecha']??$dateDefault),'date',['required'=>true,'min'=>'2000-01-01','max'=>'2100-12-31'])?><?=V::input('Folio del papel (opcional)','folio',V::value('folio',$data['folio']??''),'text',['maxlength'=>100])?></div>
+<div class="table-wrap line-table"><table><thead><tr><th>Producto por nombre *</th><th>Cantidad *</th><th>Precio *</th><th>Importe</th><th>Acción</th></tr></thead><tbody data-lines>
+<?php foreach($names as $i=>$name):?><tr data-line><td><?=V::select('Producto','producto[]',$productOptions,$name,['required'=>true,'aria-label'=>'Producto del renglón '.($i+1)])?></td><td><?=V::input('Cantidad','cantidad[]',$quantities[$i]??'','number',['step'=>$step,'min'=>$step,'required'=>true,'inputmode'=>'decimal','aria-label'=>'Cantidad del renglón '.($i+1)])?></td><td><?=V::input('Precio','precio[]',$prices[$i]??'','number',['step'=>'0.01','min'=>$captureRules['permitir_precio_cero']?'0':'0.01','required'=>true,'inputmode'=>'decimal','aria-label'=>'Precio del renglón '.($i+1)])?></td><td class="amount" data-line-total>—</td><td><button type="button" class="text-button" data-remove-line>Quitar</button></td></tr><?php endforeach?>
+</tbody></table></div>
+<div class="action-row spread"><button type="button" class="button" data-add-line>+ Agregar producto</button><strong class="total-label">Total calculado: <span data-grand-total>$0.00</span> MXN</strong></div>
+<div class="form-grid backing-row"><?=V::select('Respaldo físico *','respaldo',[''=>'Selecciona el estado del respaldo','verificado'=>'Original localizado y verificado','por_localizar'=>'Original por localizar','por_verificar'=>'Original por verificar'],V::value('respaldo',$data['respaldo']??''),['required'=>true])?><label class="field"><span>Adjuntar copia (opcional)</span><input type="file" name="copia" accept=".pdf,.png,.jpg,.jpeg"><small>PDF, PNG o JPG · hasta <?=V::h(round(Suave\Servidor::uploadLimit($db->config)/1048576,2))?> MB en este servidor.</small></label></div>
+<?php $pendingToken=(string)V::value('adjunto_token','');if($pendingToken&&isset($_SESSION['adjuntos'][$pendingToken])):?><?=V::hidden('adjunto_token',$pendingToken)?><p class="hint">Copia preparada: <?=V::h($_SESSION['adjuntos'][$pendingToken]['nombre'])?>. Se adjuntará al guardar.</p><?php endif?>
+<?php if($editing):?><?=V::textarea('Motivo de corrección *','motivo',(string)V::value('motivo',''),true)?><p class="hint">Se guardará una versión nueva de esta misma entrega. La versión anterior permanecerá en el historial.</p><?php else:?><p class="hint">La referencia se asigna al primer guardado. Un borrador queda fuera de los importes registrados.</p><?php endif?>
+<?php if(($app->error?->field??'')==='duplicado'||!empty($_POST['duplicado_confirmado'])):?><?=V::check('duplicado_confirmado','Comprobé el papel y confirmé que son documentos distintos.',!empty($_POST['duplicado_confirmado']))?><?php endif?>
+<div class="action-row spread form-actions"><div><?=$w->link($editing?'Cancelar edición':'Cancelar',$editing?'ver_entrega':$return,$editing?['id'=>$id]:[])?><?php if(!$captureRules['reglas_confirmadas']):?><small class="hint">Reglas de cantidad y precio pendientes de confirmar en Datos del mes.</small><?php endif?></div><div class="action-row"><?php if(!$editing):?><button class="button" type="submit" name="intencion" value="borrador" formnovalidate>Guardar borrador</button><?php endif?><button class="button primary" type="submit" name="intencion" value="registrar"><?=$editing?'Guardar corrección':'Registrar entrega'?></button></div></div>
+</form>
